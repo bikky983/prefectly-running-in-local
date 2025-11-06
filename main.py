@@ -40,7 +40,7 @@ def main():
     
     # Configuration - Time-based filtering for consistency
     sources = ['nepalipaisa', 'bikashnews', 'merolagani']
-    max_links_per_source = 6  # Max 6 latest articles per source
+    max_links_per_source = 3  # Max 3 latest articles per source
     total_max_links = None  # No total limit
     hours_back = 5  # Only scrape news from last 5 hours
     

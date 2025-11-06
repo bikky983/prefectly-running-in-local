@@ -2,12 +2,14 @@ name: Automated Nepali News Posts
 
 on:
   schedule:
-    # Run at 10:30 AM Nepal Time (04:45 UTC) - Morning news (5:30 AM - 10:30 AM)
-    - cron: '45 4 * * *'
-    # Run at 3:30 PM Nepal Time (09:45 UTC) - Afternoon news (11:00 AM - 3:30 PM)
-    - cron: '45 9 * * *'
-    # Run at 8:30 PM Nepal Time (14:45 UTC) - Evening news (3:30 PM - 8:30 PM)
-    - cron: '45 14 * * *'
+    # Run at 10:00 AM Nepal Time (04:15 UTC) - Morning news
+    - cron: '15 4 * * *'
+    # Run at 1:00 PM Nepal Time (07:15 UTC) - Afternoon news
+    - cron: '15 7 * * *'
+    # Run at 4:00 PM Nepal Time (10:15 UTC) - Evening news
+    - cron: '15 10 * * *'
+    # Run at 7:00 PM Nepal Time (13:15 UTC) - Night news
+    - cron: '15 13 * * *'
   
   workflow_dispatch:  # Allow manual trigger for testing
     inputs:
@@ -20,6 +22,7 @@ on:
           - morning
           - afternoon
           - evening
+          - night
           - all
 
 env:
@@ -66,19 +69,31 @@ jobs:
           sudo chmod 755 /usr/bin/rclone
           rclone version
       
+      - name: Clean up old files from previous runs
+        run: |
+          echo "🧹 Cleaning up old files to ensure fresh news..."
+          rm -f multi_source_links.json
+          rm -f multi_source_articles.json
+          rm -f multi_source_summaries.json
+          rm -rf output/
+          echo "✅ Cleanup complete"
+      
       - name: Determine time slot
         id: timeslot
         run: |
           HOUR=$(TZ='Asia/Kathmandu' date +%H)
           if [ "$HOUR" -ge 4 ] && [ "$HOUR" -lt 11 ]; then
             echo "slot=morning" >> $GITHUB_OUTPUT
-            echo "time_range=5:30 AM - 10:30 AM" >> $GITHUB_OUTPUT
-          elif [ "$HOUR" -ge 11 ] && [ "$HOUR" -lt 16 ]; then
+            echo "time_range=10:00 AM" >> $GITHUB_OUTPUT
+          elif [ "$HOUR" -ge 11 ] && [ "$HOUR" -lt 14 ]; then
             echo "slot=afternoon" >> $GITHUB_OUTPUT
-            echo "time_range=11:00 AM - 3:30 PM" >> $GITHUB_OUTPUT
-          else
+            echo "time_range=1:00 PM" >> $GITHUB_OUTPUT
+          elif [ "$HOUR" -ge 14 ] && [ "$HOUR" -lt 17 ]; then
             echo "slot=evening" >> $GITHUB_OUTPUT
-            echo "time_range=3:30 PM - 8:30 PM" >> $GITHUB_OUTPUT
+            echo "time_range=4:00 PM" >> $GITHUB_OUTPUT
+          else
+            echo "slot=night" >> $GITHUB_OUTPUT
+            echo "time_range=7:00 PM" >> $GITHUB_OUTPUT
           fi
       
       - name: Run news scraping and summarization
@@ -87,6 +102,33 @@ jobs:
           python main.py
         env:
           PYTHONUNBUFFERED: 1
+      
+      - name: Validate fresh news data
+        run: |
+          echo "🔍 Validating that we have fresh news data..."
+          
+          # Check if summaries file exists
+          if [ ! -f "multi_source_summaries.json" ]; then
+            echo "❌ ERROR: multi_source_summaries.json not found!"
+            echo "News scraping or summarization failed. Cannot proceed."
+            exit 1
+          fi
+          
+          # Check if file is not empty
+          if [ ! -s "multi_source_summaries.json" ]; then
+            echo "❌ ERROR: multi_source_summaries.json is empty!"
+            exit 1
+          fi
+          
+          # Check if file was just created (within last 10 minutes)
+          FILE_AGE=$(( $(date +%s) - $(stat -c %Y multi_source_summaries.json 2>/dev/null || stat -f %m multi_source_summaries.json) ))
+          if [ $FILE_AGE -gt 600 ]; then
+            echo "❌ ERROR: multi_source_summaries.json is too old (${FILE_AGE}s)!"
+            echo "This file was not freshly generated in this run."
+            exit 1
+          fi
+          
+          echo "✅ Fresh news data validated (age: ${FILE_AGE}s)"
       
       - name: Generate social media posts
         run: |
@@ -146,6 +188,9 @@ jobs:
           # Copy generated files
           cp output/*.png archives/${{ steps.timeslot.outputs.slot }}/${{ steps.timestamp.outputs.datetime }}/ || true
           cp multi_source_summaries.json archives/${{ steps.timeslot.outputs.slot }}/${{ steps.timestamp.outputs.datetime }}/ || true
+          
+          # Commit the post tracker to persist between runs (prevents duplicate posts)
+          git add posted_articles.json || true
           
           # Add and commit
           git add archives/

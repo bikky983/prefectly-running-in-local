@@ -28,6 +28,7 @@ from pathlib import Path
 from src.scraper_links import get_multi_source_articles
 from src.content_extractor import extract_article_content
 from src.article_summarizer import ArticleSummarizer
+from src.post_tracker import PostTracker
 
 
 def main():
@@ -42,9 +43,19 @@ def main():
     sources = ['nepalipaisa', 'bikashnews', 'merolagani']
     max_links_per_source = 3  # Max 3 latest articles per source
     total_max_links = None  # No total limit
-    hours_back = 5  # Only scrape news from last 5 hours
+    hours_back = 6  # Only scrape news from last 6 hours
     
     try:
+        # Initialize post tracker to prevent duplicates
+        print("0. Initializing post tracker...")
+        tracker = PostTracker()
+        stats = tracker.get_stats()
+        print(f"   Total articles posted historically: {stats['total_posted']}")
+        
+        # Cleanup old entries (keep last 30 days)
+        tracker.cleanup_old_entries(days=30)
+        print()
+        
         # Step 1: Scrape articles from multiple sources
         print("1. Scraping latest articles from multiple sources...")
         print(f"   Sources: {', '.join(sources)}")
@@ -64,6 +75,18 @@ def main():
             return 1
         
         print(f"   SUCCESS: Found {len(links)} articles")
+        
+        # Filter out already posted articles
+        print("   Filtering out already posted articles...")
+        original_count = len(links)
+        links = tracker.filter_new_articles(links)
+        
+        if not links:
+            print(f"   WARNING: All {original_count} articles have already been posted!")
+            print("   No new content to process. Exiting.")
+            return 0
+        
+        print(f"   Kept {len(links)} new articles (filtered {original_count - len(links)} duplicates)")
         
         # Save links
         links_file = "multi_source_links.json"
@@ -192,6 +215,14 @@ def main():
         print(f"  - {articles_file}")
         if Path("multi_source_summaries.json").exists():
             print(f"  - multi_source_summaries.json")
+        
+        print()
+        
+        # Mark articles as posted to prevent future duplicates
+        print("5. Marking articles as posted...")
+        article_urls = [link['url'] for link in links]
+        tracker.mark_batch_as_posted(article_urls)
+        print(f"   Marked {len(article_urls)} articles as posted")
         
         print()
         print("SUCCESS: Multi-source pipeline completed successfully!")

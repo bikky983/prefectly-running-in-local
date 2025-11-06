@@ -7,22 +7,118 @@ This properly handles Nepali Devanagari text including complex conjuncts
 import argparse
 import json
 import sys
+import base64
 from pathlib import Path
 from playwright.sync_api import sync_playwright
+from PIL import Image
 import datetime
+
+
+def extract_colors_from_background(image_path):
+    """Extract dominant colors from background image."""
+    try:
+        img = Image.open(image_path)
+        
+        # Resize for faster processing
+        img = img.resize((100, 100))
+        
+        # Convert to RGB if needed
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Get pixels
+        pixels = list(img.getdata())
+        
+        # Calculate average color
+        r_avg = sum(p[0] for p in pixels) // len(pixels)
+        g_avg = sum(p[1] for p in pixels) // len(pixels)
+        b_avg = sum(p[2] for p in pixels) // len(pixels)
+        
+        # Generate color variations
+        base_color = f"rgb({r_avg}, {g_avg}, {b_avg})"
+        
+        # Lighter version (for container background)
+        lighter_r = min(255, r_avg + 30)
+        lighter_g = min(255, g_avg + 30)
+        lighter_b = min(255, b_avg + 30)
+        lighter_color = f"rgba({lighter_r}, {lighter_g}, {lighter_b}, 0.98)"
+        
+        # Even lighter (for gradients)
+        lightest_r = min(255, r_avg + 50)
+        lightest_g = min(255, g_avg + 50)
+        lightest_b = min(255, b_avg + 50)
+        lightest_color = f"rgba({lightest_r}, {lightest_g}, {lightest_b}, 0.98)"
+        
+        # Darker version (for borders and accents)
+        darker_r = max(0, r_avg - 40)
+        darker_g = max(0, g_avg - 40)
+        darker_b = max(0, b_avg - 40)
+        border_color = f"rgb({darker_r}, {darker_g}, {darker_b})"
+        
+        # Even darker (for text) - make it very dark for readability
+        darkest_r = max(0, min(60, r_avg - 300))
+        darkest_g = max(0, min(60, g_avg - 300))
+        darkest_b = max(0, min(60, b_avg - 300))
+        text_color = f"rgb({darkest_r}, {darkest_g}, {darkest_b})"
+        
+        # Semi-transparent versions for news boxes
+        box_bg_1 = f"rgba({lighter_r}, {lighter_g}, {lighter_b}, 0.7)"
+        box_bg_2 = f"rgba({lightest_r}, {lightest_g}, {lightest_b}, 0.6)"
+        
+        return {
+            'base': base_color,
+            'container_start': lighter_color,
+            'container_end': lightest_color,
+            'border': border_color,
+            'border_alt': f"rgb({max(0, r_avg - 50)}, {max(0, g_avg - 50)}, {max(0, b_avg - 50)})",
+            'text': text_color,
+            'box_bg_1': box_bg_1,
+            'box_bg_2': box_bg_2,
+            'box_bg_alt_1': f"rgba({r_avg + 20}, {g_avg + 20}, {b_avg + 20}, 0.7)",
+            'box_bg_alt_2': f"rgba({r_avg + 40}, {g_avg + 40}, {b_avg + 40}, 0.5)"
+        }
+    except Exception as e:
+        # Fallback to default colors if extraction fails
+        print(f"Warning: Could not extract colors from background: {e}")
+        return {
+            'base': 'rgb(230, 210, 200)',
+            'container_start': 'rgba(255, 250, 245, 0.98)',
+            'container_end': 'rgba(255, 245, 240, 0.98)',
+            'border': '#d4a574',
+            'border_alt': '#c9916d',
+            'text': '#2c1810',
+            'box_bg_1': 'rgba(255, 255, 255, 0.6)',
+            'box_bg_2': 'rgba(255, 250, 245, 0.4)',
+            'box_bg_alt_1': 'rgba(255, 248, 240, 0.7)',
+            'box_bg_alt_2': 'rgba(255, 245, 235, 0.5)'
+        }
 
 
 def create_html_template(summaries, show_numbers=True, start_index=1):
     """Create HTML template with Nepali summaries."""
+    
+    # Get absolute path to background image and convert to base64
+    background_path = Path('background.png').absolute()
+    
+    # Extract colors from background image
+    colors = extract_colors_from_background(background_path)
+    
+    # Read and encode background image as base64
+    background_data_url = ""
+    if background_path.exists():
+        with open(background_path, 'rb') as f:
+            background_bytes = f.read()
+            background_base64 = base64.b64encode(background_bytes).decode('utf-8')
+            background_data_url = f"data:image/png;base64,{background_base64}"
     
     # Build summary HTML
     summary_html = ""
     for i, summary in enumerate(summaries, start_index):
         summary_text = summary.get('summary', '')
         if show_numbers:
-            summary_html += f'<div class="summary">{i}. {summary_text}</div>\n'
+            summary_html += f'<div class="summary">📰 {i}. {summary_text}</div>\n'
         else:
-            summary_html += f'<div class="summary">{summary_text}</div>\n'
+            summary_html += f'<div class="summary">📰 {summary_text}</div>\n'
     
     html = f"""
     <!DOCTYPE html>
@@ -30,16 +126,17 @@ def create_html_template(summaries, show_numbers=True, start_index=1):
     <head>
         <meta charset="UTF-8">
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;600&display=swap');
+            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;600;700&display=swap');
             
             body {{
                 margin: 0;
                 padding: 0;
                 width: 1080px;
                 height: 1920px;
-                background-image: url('file:///{Path('background.png').absolute().as_posix()}');
+                background-image: url('{background_data_url}');
                 background-size: cover;
                 background-position: center;
+                background-repeat: no-repeat;
                 font-family: 'Noto Sans Devanagari', sans-serif;
                 display: flex;
                 align-items: center;
@@ -49,24 +146,46 @@ def create_html_template(summaries, show_numbers=True, start_index=1):
             .container {{
                 width: 90%;
                 max-width: 950px;
-                padding: 60px 40px;
-                background: rgba(255, 255, 255, 0.95);
-                border-radius: 20px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                padding: 50px 45px;
+                background: linear-gradient(135deg, {colors['container_start']} 0%, {colors['container_end']} 100%);
+                border-radius: 30px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15), 
+                            0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+                border: 3px solid {colors['border']};
             }}
             
             .summary {{
-                font-size: 32px;
-                line-height: 1.6;
-                color: #1a1a1a;
-                margin-bottom: 40px;
-                padding-bottom: 30px;
-                border-bottom: 2px solid #e0e0e0;
+                position: relative;
+                font-size: 34px;
+                line-height: 1.7;
+                color: {colors['text']};
+                font-weight: 500;
+                margin-bottom: 35px;
+                padding: 25px 30px;
+                background: linear-gradient(to right, {colors['box_bg_1']}, {colors['box_bg_2']});
+                border-left: 5px solid {colors['border']};
+                border-radius: 12px;
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+                transition: all 0.3s ease;
+            }}
+            
+            .summary:nth-child(odd) {{
+                border-left-color: {colors['border']};
+                background: linear-gradient(to right, {colors['box_bg_alt_1']}, {colors['box_bg_alt_2']});
+            }}
+            
+            .summary:nth-child(even) {{
+                border-left-color: {colors['border_alt']};
+                background: linear-gradient(to right, {colors['box_bg_1']}, {colors['box_bg_2']});
             }}
             
             .summary:last-child {{
-                border-bottom: none;
                 margin-bottom: 0;
+            }}
+            
+            .summary:hover {{
+                transform: translateX(5px);
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
             }}
         </style>
     </head>
@@ -139,7 +258,11 @@ def generate_multiple_posts(summaries, output_dir, config):
             # Render
             page = browser.new_page(viewport={'width': 1080, 'height': 1920})
             page.set_content(html)
-            page.wait_for_timeout(2000)
+            
+            # Wait for fonts and background image to load
+            page.wait_for_timeout(3000)
+            
+            # Take screenshot
             page.screenshot(path=str(output_path), full_page=True)
             page.close()
             

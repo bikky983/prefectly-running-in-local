@@ -1,5 +1,5 @@
 name: Automated Nepali News Posts
-kgxgjztiztiztuzizutzgzitz
+
 on:
   schedule:
     # Run at 10:30 AM Nepal Time (04:45 UTC) - Morning news (5:30 AM - 10:30 AM)

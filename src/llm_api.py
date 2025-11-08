@@ -70,15 +70,74 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 
-@retry(
-    stop=stop_after_attempt(LLM_MAX_RETRIES),
-    wait=wait_exponential(multiplier=LLM_RETRY_DELAY, min=1, max=10),
-    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError, RateLimitError)),
-    before_sleep=before_sleep_log(logger, "WARNING")
-)
+async def _make_api_request_single(
+    client: httpx.AsyncClient, 
+    api_url: str,
+    request_body: dict,
+    headers: dict,
+    model_name: str
+) -> dict:
+    """
+    Make a single API request to an LLM endpoint.
+    
+    Args:
+        client: HTTP client instance
+        api_url: API endpoint URL
+        request_body: Request payload
+        headers: Request headers
+        model_name: Name of the model (for logging)
+    
+    Returns:
+        dict: API response
+    
+    Raises:
+        LLMAPIError: If API request fails
+        RateLimitError: If rate limit is exceeded
+    """
+    try:
+        response = await client.post(
+            api_url,
+            json=request_body,
+            headers=headers,
+            timeout=LLM_REQUEST_TIMEOUT
+        )
+        
+        # Handle rate limiting
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("retry-after", 10))
+            logger.warning(f"  Rate limited (429) for {model_name}, retry after {retry_after}s")
+            raise RateLimitError(f"Rate limited, retry after {retry_after} seconds")
+        
+        # Handle insufficient credits
+        if response.status_code == 402:
+            logger.warning(f"  Model {model_name} requires credits (402)")
+            raise LLMAPIError(f"Insufficient credits for {model_name}")
+        
+        # Handle model not found
+        if response.status_code == 404:
+            logger.warning(f"  Model {model_name} not found (404)")
+            raise LLMAPIError(f"Model {model_name} not available")
+        
+        # Handle other HTTP errors
+        response.raise_for_status()
+        
+        return response.json()
+        
+    except httpx.HTTPStatusError as e:
+        error_msg = f"HTTP error {e.response.status_code}: {e.response.text[:100]}"
+        logger.error(f"  {error_msg}")
+        raise LLMAPIError(error_msg)
+    
+    except httpx.RequestError as e:
+        error_msg = f"Request error: {str(e)}"
+        logger.error(f"  {error_msg}")
+        raise LLMAPIError(error_msg)
+
+
 async def _make_api_request(client: httpx.AsyncClient, request_body: dict) -> dict:
     """
-    Make API request to DeepSeek with retry logic.
+    Make API request with automatic fallback to multiple free models.
+    Tries DeepSeek first, then falls back to other free OpenRouter models.
     
     Args:
         client: HTTP client instance
@@ -88,39 +147,110 @@ async def _make_api_request(client: httpx.AsyncClient, request_body: dict) -> di
         dict: API response
     
     Raises:
-        LLMAPIError: If API request fails after retries
-        RateLimitError: If rate limit is exceeded
+        LLMAPIError: If all models fail after retries
     """
     headers = get_api_headers()
     
-    try:
-        response = await client.post(
-            DEEPSEEK_API_URL,
-            json=request_body,
-            headers=headers,
-            timeout=LLM_REQUEST_TIMEOUT
-        )
-        
-        # Handle rate limiting
-        if response.status_code == 429:
-            retry_after = int(response.headers.get("retry-after", 60))
-            logger.warning(f"Rate limited by API, retry after {retry_after} seconds")
-            raise RateLimitError(f"Rate limited, retry after {retry_after} seconds")
-        
-        # Handle other HTTP errors
-        response.raise_for_status()
-        
-        return response.json()
-        
-    except httpx.HTTPStatusError as e:
-        error_msg = f"HTTP error {e.response.status_code}: {e.response.text}"
-        logger.error(error_msg)
-        raise LLMAPIError(error_msg)
+    # Define models to try in order (primary + fallbacks)
+    models_to_try = [
+        {
+            "url": DEEPSEEK_API_URL,
+            "model": request_body.get("model", "deepseek-chat"),
+            "name": "DeepSeek (Primary)",
+            "headers": headers
+        },
+        {
+            "url": "https://openrouter.ai/api/v1/chat/completions",
+            "model": "meta-llama/llama-3.2-3b-instruct:free",
+            "name": "Llama 3.2 3B (FREE)",
+            "headers": {
+                **headers,
+                "HTTP-Referer": "https://github.com",
+                "X-Title": "Nepali News Summarizer"
+            }
+        },
+        {
+            "url": "https://openrouter.ai/api/v1/chat/completions",
+            "model": "google/gemini-2.0-flash-exp:free",
+            "name": "Gemini 2.0 Flash (FREE)",
+            "headers": {
+                **headers,
+                "HTTP-Referer": "https://github.com",
+                "X-Title": "Nepali News Summarizer"
+            }
+        },
+        {
+            "url": "https://openrouter.ai/api/v1/chat/completions",
+            "model": "qwen/qwen-2-7b-instruct:free",
+            "name": "Qwen 2 7B (FREE)",
+            "headers": {
+                **headers,
+                "HTTP-Referer": "https://github.com",
+                "X-Title": "Nepali News Summarizer"
+            }
+        }
+    ]
     
-    except httpx.RequestError as e:
-        error_msg = f"Request error: {str(e)}"
-        logger.error(error_msg)
-        raise LLMAPIError(error_msg)
+    # Try each model with retry logic
+    for model_config in models_to_try:
+        logger.info(f"Trying model: {model_config['name']}")
+        
+        # Update request body with current model
+        current_request = {**request_body, "model": model_config["model"]}
+        
+        # Try this model with retries
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"  Attempt {attempt + 1}/{max_retries}...")
+                
+                response = await _make_api_request_single(
+                    client,
+                    model_config["url"],
+                    current_request,
+                    model_config["headers"],
+                    model_config["name"]
+                )
+                
+                logger.info(f"✓ Successfully got response from {model_config['name']}")
+                return response
+                
+            except RateLimitError as e:
+                if attempt < max_retries - 1:
+                    wait_time = 5 * (attempt + 1)  # 5s, 10s
+                    logger.warning(f"  Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    logger.warning(f"  Max retries reached for {model_config['name']}, trying next model...")
+                    break
+                    
+            except LLMAPIError as e:
+                # For 402/404 errors, immediately try next model
+                if "402" in str(e) or "404" in str(e) or "credits" in str(e).lower():
+                    logger.warning(f"  Skipping {model_config['name']}, trying next model...")
+                    break
+                # For other errors, retry
+                elif attempt < max_retries - 1:
+                    logger.warning(f"  Retrying after error...")
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    logger.warning(f"  Max retries reached for {model_config['name']}, trying next model...")
+                    break
+                    
+            except Exception as e:
+                logger.error(f"  Unexpected error with {model_config['name']}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    break
+    
+    # If we get here, all models failed
+    error_msg = "All AI models failed to generate summary (tried DeepSeek + 3 free fallback models)"
+    logger.error(f"✗ {error_msg}")
+    raise LLMAPIError(error_msg)
 
 
 def _extract_summary_from_response(api_response: dict) -> str:
